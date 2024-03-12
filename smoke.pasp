@@ -1,0 +1,31 @@
+% Rule (i).
+% 0.25::smokes(X) :- stress(X).
+% Rule (ii).
+% 1/5::smokes(X) :- influences(Y, X), smokes(Y).
+% Fact (a).
+% 0.3::influences(bill, anna). 0.4::influences(carol, anna).
+% Fact (b).
+% 1/3::stress(bill); 1/3::stress(carol); 1/3::stress(daniel).%
+%%%%%%% grounded %%%%
+0.25::a(bill).
+0.25::b(carol).
+0.25::c(daniel).
+0.2::d(carol,anna).
+0.2::e(bill,anna).
+0.3::influences(bill,anna).
+0.4::influences(carol,anna).
+0.333::stress(bill); 0.333::stress(carol); 0.334::stress(daniel).
+%
+smokes(bill) :- stress(bill), a(bill).
+smokes(carol) :- stress(carol), b(carol).
+smokes(daniel) :- stress(daniel), c(daniel).
+smokes(anna) :- smokes(carol), influences(carol,anna), d(carol,anna).
+smokes(anna) :- smokes(bill), influences(bill,anna), e(bill,anna).
+% Query 1.
+#query smokes(anna).
+% Query 2.
+#query smokes(anna) | smokes(bill).
+% Query 3.
+#query not smokes(anna) | not stress(carol).
+% Select the maxent semantics.
+#semantics maxent.
