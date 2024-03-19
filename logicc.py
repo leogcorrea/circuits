@@ -13,18 +13,34 @@ class Layer(nn.Module):
 
 
 class InputLayer(Layer):
-    def __init__(self, id, matrix, negated):
+    def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
         self.linearTransform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        self.linearTransform.weight = self.weight
+        #self.linearTransform.weight = nn.Parameter(self.weight, requires_grad=False)
         self.negated = negated
+        self.input_mask = input_mask
+        self.gains = None
+        self.set_gains(gains)
+
+    def set_gains(self, gains):
+        xgains = torch.matmul(self.input_mask, gains)
+        sel = self.negated - xgains
+        self.gains = abs(sel) + (sel == 0).type(torch.float) 
+        self.linearTransform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
+
+    def set_negated(self, value):
+        self.negated = value
 
     def forward(self, input):
-        y = self.linearTransform(input)
-        y = abs(self.negated - y)
+        if len(input) > 1:
+            x = torch.matmul(input[0], input[1].t())
+            y = abs(self.negated - x)
+        else:
+            y = self.linearTransform(input[0])
+        
         #y = torch.log(x)
         return y
-
+    
 
 class AndLayer(Layer):
     def __init__(self, id, matrix):
@@ -95,6 +111,8 @@ def build_layers(root):
     levels = {}
     populate_levels(root, levels)
 
+    MAX_VIRTUAL_NODES = 10.
+
     max_level = get_max_level(root)
     layers = {i: set() for i in range(max_level+1)}     
 
@@ -125,7 +143,7 @@ def build_layers(root):
                 for l in range(level, max_level+1):
                     layers[l].add(node)
         else:
-            if (node_t != layer_t):  # if the node type is different from other nodes in this layer
+            if (node_t != layer_t):
                 nlevel = level+1
                 levels[node.id] = nlevel
 
@@ -138,9 +156,11 @@ def build_layers(root):
                     nlevel += 1
                     levels[node.id] = nlevel
                 ldiff = nlevel-level
+                while ldiff >= MAX_VIRTUAL_NODES:
+                    MAX_VIRTUAL_NODES *= 10.0
                 tflag = ldiff % 2
                 for i in range(1, ldiff+1):
-                    new_nodeid = -(hash(node) + i/100.0)
+                    new_nodeid = -(hash(node) + i/MAX_VIRTUAL_NODES)
                     nnode_t = layer_t if i % 2 == tflag else other_t 
                     node = nnode_t(new_nodeid, [node])
                     levels[node.id] = nlevel-i
@@ -161,7 +181,7 @@ def build_layers(root):
     return layers, levels
 
 
-def build_connections(layers, levelDict, nvars, marginals):
+def build_connections(layers, levelDict, nvars):
     max_level = len(layers) - 1
 
     connections = [None]*(max_level + 1)
@@ -170,21 +190,22 @@ def build_connections(layers, levelDict, nvars, marginals):
     child_dict = {}
 
     for level, nodeSet in layers.items():
-        nodes = sorted(nodeSet, key=lambda node: abs(int(node.id)))
+        nodes = sorted(nodeSet, key=lambda node: hash(node))
         rows = len(nodes)
         childSet = set()
 
         if level == max_level:
-            cols = nvars
-        else:
-            for node in nodes:
-                if type(node) is nnf.LiteralNode:
-                    childSet.add(node)
-                else:
-                    for child in node.children:
-                        childSet.add(child)
-        
-            cols = len(childSet)
+        #    cols = nvars
+            input_mask = torch.zeros(rows, nvars) 
+        #else:
+        for node in nodes:
+            if type(node) is nnf.LiteralNode:
+                childSet.add(node)
+            else:
+                for child in node.children:
+                    childSet.add(child)
+
+        cols = len(childSet)
 
         connections[level] = torch.zeros(rows, cols) 
         parent_count = 0
@@ -201,18 +222,19 @@ def build_connections(layers, levelDict, nvars, marginals):
           
             if levelDict[node] == max_level:          
                 if level == max_level:
-                    child_idx = node.literal-1
-                    negated[parent_idx] = False if marginals[child_idx] else node.negated #torch.tensor(torch.finfo().tiny)
+                    #child_idx = node.literal-1
+                    input_mask[parent_idx, node.literal-1] = 1
+                    negated[parent_idx] = node.negated  #torch.tensor(torch.finfo().tiny)
+                #else:
+                if node in child_dict:
+                    child_idx = child_dict[node]
                 else:
-                    if node in child_dict:
-                        child_idx = child_dict[node]
-                    else:
-                        child_idx = child_count
-                        child_dict[node] = child_idx
-                        child_count +=1
+                    child_idx = child_count
+                    child_dict[node] = child_idx
+                    child_count +=1
                 connections[level][parent_idx, child_idx] = 1
             else:
-                children = sorted(node.children, key=lambda node: abs(node.id))
+                children = sorted(node.children, key=lambda node: hash(node))
                 for child in children:
                     if child in child_dict:
                         child_idx = child_dict[child]
@@ -222,35 +244,37 @@ def build_connections(layers, levelDict, nvars, marginals):
                         child_count +=1
                     connections[level][parent_idx, child_idx] = 1
 
-    return connections, negated
+    return connections, negated, input_mask
 
 
-class LogicCircuit:
+class LogicCircuit(nn.Sequential):
     def __init__(self, layers, nliterals):
         super().__init__()
-        self.sequential = nn.Sequential()
         self.layers = layers
         for layer in layers:
-            self.sequential.append(layer)
+            self.append(layer)
         self.nliterals = nliterals
 
-    def evaluate(self, input):
-        return self.sequential(input)
+    def evaluate(self, configuration):
+        if len(self.layers) == 0:
+            raise IndexError("No input layer defined")
+
+        return self((configuration, self.layers[0].input_mask))
+
+    def set_input_weights(self, value):
+        if len(self.layers) == 0:
+            raise IndexError("No input layer defined")
+        self.layers[0].set_gains(value)
 
 
-def build_circuit(filename, marginals = None):
-    rootId, nodeList, nodeDict, nvars = nnf.parse(filename)
+def build_circuit(filename):
+    rootId, _, nodeDict, nvars = nnf.parse(filename)
 
     root = nodeDict[rootId]
+
     layerSet, levelDict = build_layers(root)   
-    margVec= [False]*nvars
 
-    if marginals:
-        for interval in marginals:
-            for literal in range(interval[0], interval[1]):
-                margVec[literal-1] = True
-
-    connections, negated = build_connections(layerSet, levelDict, nvars, margVec)
+    connections, negated, input_mask = build_connections(layerSet, levelDict, nvars)
 
     root_t = type(root)
     rlayer_t = OrLayer if root_t is nnf.OrNode else AndLayer
@@ -261,7 +285,7 @@ def build_circuit(filename, marginals = None):
 
     layers = []
 
-    inputLayer = InputLayer(last, connections[last], negated)
+    inputLayer = InputLayer(last, connections[last], negated, input_mask, torch.ones(nvars))
     layers.append(inputLayer)
 
     for i in range(last-1, -1, -1):
@@ -282,7 +306,7 @@ def test(filename):
 
     nconf = 2 ** nvars
     
-    print('Total configurations to test = '.format(nconf))
+    print('Total configurations to test = {}'.format(nconf))
 
     for conf in range(nconf):
         print('\rTesting {}', conf, end='')
@@ -301,24 +325,43 @@ def test(filename):
 
 
 if __name__ == '__main__':
-
-    #filename = 'simple'
-    #filename = 'simple_w_constraint_opt'
-    #filename = 'montyhall_w_constraint_pre'
+    if 1:
+        test('simple_w_constraint_opt')
+    
     filename = 'smoke_pre.cnf'
+    import time
+    start_time = time.time()
+    circuit = build_circuit(filename + '.nnf')
+    print("Time to build the circuit (s): ", time.time() - start_time)
 
-    if 0:
-        test(filename)
+    probs = torch.tensor([0.25, 0.25, 0.25, 0.2, 0.2, 0.3, 0.4, 1., 1., 1., 1., 1., 1., 1., 0.333, 0.4992503748125937, 1., 1., 1., 1., 1., 1., 1., 1.]) 
 
-    marginals = [[8, 14], [18, 24]]
-    #marginals = None
-    circuit = build_circuit(filename + '.nnf', marginals)
+    circuit.set_input_weights(probs)
 
-    input = torch.tensor([0.25, 0.25, 0.25, 0.2, 0.2, 0.3, 0.4, 1., 1., 1., 1., 1., 1., 1., 0.333, 0.4992503748125937, 1., 1., 1., 1., 1., 1., 1., 1.])
-    #input = torch.ones(1, circuit.nliterals)
+    input = torch.ones(1, 48)
+    input[0, 14+23] = 0.0
+    output = circuit(input)
+    print("Output: ", output)
 
-    output = circuit.evaluate(input)
+    input = torch.ones(1, 48)
+    input[0, 11+23] = 0.0
+    b = circuit(input)
 
-    print("Circuit: ", filename)
-    print("Input:", input)
-    print("Output:", output)
+    input[0, 14+23] = 0.0
+    output = circuit(input) / b
+    print("Output: ", output)
+
+    input = torch.ones(1, 48)
+    input[0, 8] = 0.0
+    b = circuit(input)
+
+    start_time = time.time()
+
+    input[0, 13] = 0.0
+    a = circuit(input)
+    output= a/b
+
+    print("Time to compute inference (s): ", time.time() - start_time)
+    print("Circuit: ", filename + '.nnf')
+    print("Input: ", input)
+    print("Output: ", output)
