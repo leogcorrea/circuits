@@ -4,14 +4,16 @@ import nnf
 import cnf
 import collections
 
-
+""" Base class for the probabilistic circuit. Represents an abstract layer.  """
 class Layer(nn.Module):
     def __init__(self, id, matrix):
         super().__init__()
         self.id = id
         self.weight = nn.Parameter(matrix, requires_grad=False)
 
-
+""" The input layer which operates a linear transform on the inputs. It receives: 
+    a) an input configuration (comprising literal values); or 
+    b) the input node values themselves. """
 class InputLayer(Layer):
     def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
@@ -22,26 +24,32 @@ class InputLayer(Layer):
         self.gains = None
         self.set_gains(gains)
 
+    """ Gains (weights) applied by the linear transform on the inputs """
     def set_gains(self, gains):
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
         self.gains = abs(sel) + (sel == 0).type(torch.float) 
         self.linearTransform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
 
+    """ Mask to obtain the negation of input literal according to the circuit setup """
     def set_negated(self, value):
         self.negated = value
 
+    """ The linear transform application """
     def forward(self, input):
         if len(input) > 1:
+            """ Transforms literal values into node states according to the circuit setup """
             x = torch.matmul(input[0], input[1].t())
             y = abs(self.negated - x)
         else:
+            """ Or operates on the node states informed directly """
             y = self.linearTransform(input[0])
         
         #y = torch.log(x)
         return y
     
 
+""" A circuit layer which calculate an AND operation (product) of the input """
 class AndLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
@@ -56,7 +64,7 @@ class AndLayer(Layer):
         y = torch.prod(x, dim = 1)
         return y
 
-
+""" A OR layer which sum up the input """
 class OrLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
@@ -75,7 +83,8 @@ class OrLayer(Layer):
 
         return self.linearTransform(input)
 
-    
+
+""" Currently not being used. Could be use in the future for reading out the results of the circuit just calculated """
 class OutputLayer(OrLayer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
@@ -86,6 +95,7 @@ class OutputLayer(OrLayer):
         return y
     
 
+""" Get the max level (depth in terms of layers) found in the circuit """
 def get_max_level(node, level = 0):
     max_level = level
     for child in node.children:
@@ -94,7 +104,12 @@ def get_max_level(node, level = 0):
             max_level = l
     return max_level
     
-
+""" Determines the depth level (an increasing integer, zero based) in which each NNF node appears in the circuit.
+    Input: 
+        node: the NNF node to start from
+        levels: a possibly empty dict of levels associating each node ID to a integer value (the level)
+    Output: a populated dict of levels 
+"""
 def populate_levels(node, levels, level = 0):
     if node.id in levels:
         current = levels[node.id]
@@ -106,19 +121,23 @@ def populate_levels(node, levels, level = 0):
     for child in node.children:
         populate_levels(child, levels, level+1)
 
+""" Construct a dict of levels and related sets of nodes separating them in layers and organized as intercaling OR and AND layers. 
+    May possibly create the so called 'virtual nodes' to aggregate multiple nodes in one layer belonging to the same
+    layer operation (OR or AND).
 
+    Input: 
+        root: NNF node of the tree representing the circuit
+"""
 def build_layers(root):
     levels = {}
     populate_levels(root, levels)
-
-    MAX_VIRTUAL_NODES = 10.
 
     max_level = get_max_level(root)
     layers = {i: set() for i in range(max_level+1)}     
 
     level = 0
     root_t = type(root)
-    other_t = nnf.OrNode if root_t is nnf.AndNode else nnf.AndNode 
+    other_t = nnf.OrNode if root_t is nnf.AndNode else nnf.AndNode # Used for intercalating the node/layer types
     
     queue = collections.deque()
     queue.append((root, level))
@@ -128,59 +147,63 @@ def build_layers(root):
 
     get_layer_type = lambda level: root_t if level % 2 == 0 else other_t
 
+    # start a BFS in the tree
     while len(queue):
         node, level = queue.popleft()
 
         layer_t = get_layer_type(level)
         node_t = type(node)
-        nlevel = levels[node.id]
+        nlevel = levels[node.id] # Get the max level the node appears in
         ldiff = nlevel-level
 
-        if (node_t == nnf.LiteralNode):
+        if (node_t == nnf.LiteralNode): # Literal nodes are leaves of the tree representing the circuit
             if (node not in leaves):
                 leaves.add(node) 
                 levels[node.id] = max_level
                 for l in range(level, max_level+1):
                     layers[l].add(node)
         else:
-            if (node_t != layer_t):
+            if (node_t != layer_t): # If the node type is different than the layer type, creates a 'virtual node' representation
                 nlevel = level+1
                 levels[node.id] = nlevel
 
             if level > nlevel:
-                levels[node.id] = level 
-            elif level < nlevel:
+                levels[node.id] = level # Update the max level this node appears just in case it has been moved down due to a new layer added
+            elif level < nlevel:  # this case requires that if the node is not in the current layer, creates multiple virtual nodes to populate
+                                  # the 
                 if node in layers[level]:
                     continue
                 if (node_t != get_layer_type(nlevel)):
-                    nlevel += 1
-                    levels[node.id] = nlevel
-                ldiff = nlevel-level
-                while ldiff >= MAX_VIRTUAL_NODES:
-                    MAX_VIRTUAL_NODES *= 10.0
+                    nlevel += 1  # A new layer should be created to include the current node
+                    levels[node.id] = nlevel  # Update it
+                ldiff = nlevel-level   #
+                # To create IDs for the virtual nodes, we use the same integer part and add some increasing unique decimal part 
+                max_virtual_nodes = 10.
+                while ldiff >= max_virtual_nodes:
+                    max_virtual_nodes *= 10.0
                 tflag = ldiff % 2
                 for i in range(1, ldiff+1):
-                    new_nodeid = -(hash(node) + i/MAX_VIRTUAL_NODES)
+                    new_nodeid = hash(node) + i/max_virtual_nodes # creates new nodes ID based on the hash(integer part of the ID) + decimal part
                     nnode_t = layer_t if i % 2 == tflag else other_t 
-                    node = nnode_t(new_nodeid, [node])
-                    levels[node.id] = nlevel-i
+                    node = nnode_t(new_nodeid, [node]) # instantiates a new virtual node which has the previous node as its child
+                    levels[node.id] = nlevel-i # assigns a level to it
                 levels[node.id] = nlevel-i
             layers[level].add(node)
 
         if len(node.children):
             new_level = level + 1
-            if new_level > max_level:
+            if new_level > max_level: # should it be necessary, creates a new layer and put all leaves in it
                 max_level += 1
                 layers[new_level] = leaves.copy()
-                for leaf in leaves:
+                for leaf in leaves: # assigns each leaf node a new level
                     levels[leaf.id] = max_level
 
-            for child in node.children:
+            for child in node.children: # visits children nodes
                 queue.append((child, new_level))
 
     return layers, levels
 
-
+""" Creates matrices for connecting consecutive layers to be used by the layer operation itself. """
 def build_connections(layers, levelDict, nvars):
     max_level = len(layers) - 1
 
@@ -246,7 +269,9 @@ def build_connections(layers, levelDict, nvars):
 
     return connections, negated, input_mask
 
-
+""" A Logic circuit is a sequence of intercalating OR and AND layers operating on a sequence of literal values (via evaluate() method) 
+    or an initial node setup as input (via __call__() operator which is dispatched to the inherited forward() method of nn.Sequential)
+ """
 class LogicCircuit(nn.Sequential):
     def __init__(self, layers, nliterals):
         super().__init__()
@@ -255,18 +280,22 @@ class LogicCircuit(nn.Sequential):
             self.append(layer)
         self.nliterals = nliterals
 
+    """ Calls the input layer with a configuration of literal values """
     def evaluate(self, configuration):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
 
+        """ Calls the forward() method with two arguments, the input configuration and an input mask """
         return self((configuration, self.layers[0].input_mask))
 
+    """ Define gains or input weights most likely representing probabilities """
     def set_input_weights(self, value):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value)
 
 
+""" Main method to build a LogicCircuit instance based on a NNF file format """
 def build_circuit(filename):
     rootId, _, nodeDict, nvars = nnf.parse(filename)
 
@@ -290,14 +319,14 @@ def build_circuit(filename):
 
     for i in range(last-1, -1, -1):
         layer_t = rlayer_t if i % 2 == 0 else olayer_t
-        layers.append(layer_t(i, connections[i]))        
+        layers.append(layer_t(i, connections[i])) # creates a layer with intercalating types (OR / AND) and corresponding connection matrix
     
     #outputLayer = OutputLayer(connections[0])
     #net.append(outputLayer)
 
     return LogicCircuit(layers, nvars)
 
-
+""" Given a file name with both CNF and NNF formats variations, generated a set of inputs and test them against the represented formulas """
 def test(filename):
 
     clauses, nvars  = cnf.build(filename + '.cnf')
@@ -324,6 +353,7 @@ def test(filename):
             print("\nInput: {}, Output1: {} Output2: {}".format(input, result1, result2))
 
 
+""" Usage examples """
 if __name__ == '__main__':
     if 1:
         test('simple_w_constraint_opt')
