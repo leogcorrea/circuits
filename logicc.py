@@ -31,6 +31,7 @@ class InputLayer(Layer):
 
     """ Gains (weights) applied by the linear transform on the inputs """
     def set_gains(self, gains):
+        xgains2 = torch.matmul(gains, self.input_mask.t())
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
         self.gains = abs(sel) + (sel == 0).type(torch.float) 
@@ -282,6 +283,7 @@ class LogicCircuit(nn.Sequential):
         for layer in layers:
             self.append(layer)
         self.nliterals = nliterals
+        self.probnorm = 1.0
 
     """ Calls the input layer with a configuration of literal values """
     def evaluate(self, configuration):
@@ -296,36 +298,32 @@ class LogicCircuit(nn.Sequential):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value)
+        self.probnorm = self(torch.ones(1, self.get_input_size()))
 
     def get_input_size(self):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         return self.layers[0].linearTransform.weight.size(dim=0)
     
-    # def infer(self, literals):
-    #     if len(self.layers) == 0:
-    #         raise IndexError("No input layer defined")
-    #     idxs = torch.nonzero(circuit.layers[0].input_mask[:, literals], as_tuple=True)[0]
-    #     neg = torch.zeros_like(circuit.layers[0].negated)
-    #     neg[idxs] = circuit.layers[0].negated[idxs]
-
-    #     return self((torch.ones(1, self.nliterals), self.layers[0].input_mask, neg))
-    
-    def infer(self, literals):
+    def infer(self, literals = []):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
-        lit = torch.abs(torch.tensor(literals)) - 1
-        idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0]
+        if len(literals):
+            lit = torch.abs(torch.tensor(literals)) - 1
+            idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0]
+        else:
+            idxs = []
         neg = torch.zeros_like(self.layers[0].negated)
         neg[idxs] = self.layers[0].negated[idxs]
-
         conf = torch.ones(1, self.nliterals)
-        #conf[0, literals] = 0.0
+
         for l in literals:
             if l < 0:
                 conf[0,abs(l)-1] = 0.0
 
-        return self((conf, self.layers[0].input_mask, neg))
+        return self((conf, self.layers[0].input_mask, neg)) / self.probnorm
+    
+
 """ Main method to build a LogicCircuit instance based on a NNF file format """
 def build_circuit(filename):
     rootId, _, nodeDict, nvars = nnf.parse(filename)
@@ -398,7 +396,7 @@ def test_probabilities(filename = 'smoke_pre.cnf'):
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0117])) < EPSILON else " [REJECTED]")
 
     b = circuit.infer([11])
-    output = circuit.infer([11, 14]) / b
+    output = ( circuit.infer([11, 14])) / b 
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0600])) < EPSILON else " [REJECTED]")
 
@@ -408,11 +406,13 @@ def test_probabilities(filename = 'smoke_pre.cnf'):
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.9925])) < EPSILON else " [REJECTED]")
 
+
 """ Usage examples """
 if __name__ == '__main__':
 
-    #test_configurations()
-    test_probabilities()
+    #if TESTS:
+    #test_configurations('digits.pasp')
+    #test_probabilities()
 
     filename = sys.argv[1]
     c2d_executable = sys.argv[2]
@@ -431,7 +431,7 @@ if __name__ == '__main__':
         with open(filename, "w") as outfile:
             outfile.write(str_cnf)
 
-    process = Popen([c2d_executable, "-in", filename, "-dt_method", "4"], stdout=PIPE)# ,"-smooth_all"], stdout=PIPE)
+    process = Popen([c2d_executable, "-in", filename, "-dt_method", "4"], stdout=PIPE)
     (poutput, perr) = process.communicate()
     exit_code = process.wait()
 
@@ -448,22 +448,33 @@ if __name__ == '__main__':
     circuit = build_circuit(filename + '.nnf')
     print("Time to build the circuit (s): ", time.time() - start_time)
 
+    lit2idx = lambda lit: lit-1
+
     probs = torch.ones(circuit.nliterals)
-    for i in range(20):
-          probs[i] = 0.01
-    probs[9] = 0.91
-    probs[12] = 0.42 
-    probs[17] = 0.5 
+    #for lit in range(1, 4+1):
+    probs[lit2idx(1)] = 0.2
+    probs[lit2idx(2)] = 0.8
+    probs[lit2idx(3)] = 0.1
+    probs[lit2idx(4)] = 0.9
+
+    # for lit in range(1, 20+1):
+    #     probs[lit2idx(lit)] = 0.01
+    # probs[lit2idx(10)] = 0.91
+    # probs[lit2idx(13)] = 0.42 
+    # probs[lit2idx(18)] = 0.5 
         
     circuit.set_input_weights(probs)
 
-    input = [32]
-    
-    start_time = time.time()
-    output = circuit.infer(input)
+
+    for lit in range(5, 7+1):
+        input = [lit]
+        start_time = time.time()
+        output = circuit.infer(input)
+        print("Input (literals): ", input)
+        print("Output: ", output)
 
     print("Time to compute inference (s): ", time.time() - start_time)
     print("Circuit: ", filename + '.nnf')
-    print("Input (literals): ", input)
-    print("Output: ", output)
+    #print("Input (literals): ", input)
+    #print("Output: ", output)
     print("Weights(probabilities): ", probs)
