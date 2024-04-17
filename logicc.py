@@ -31,7 +31,6 @@ class InputLayer(Layer):
 
     """ Gains (weights) applied by the linear transform on the inputs """
     def set_gains(self, gains):
-        xgains2 = torch.matmul(gains, self.input_mask.t())
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
         self.gains = abs(sel) + (sel == 0).type(torch.float) 
@@ -178,13 +177,13 @@ def build_layers(root):
             if (node_t != layer_t): # If the node type is different than the layer type, creates a 'virtual node' representation
                 nlevel = level+1
                 levels[node.id] = nlevel
-
+            if node in layers[level]:
+                continue
             if level > nlevel:
                 levels[node.id] = level # Update the max level this node appears just in case it has been moved down due to a new layer added
             elif level < nlevel:  # this case requires that if the node is not in the current layer, creates multiple virtual nodes to populate
                                   # the 
-                if node in layers[level]:
-                    continue
+
                 if (node_t != get_layer_type(nlevel)):
                     nlevel += 1  # A new layer should be created to include the current node
                     levels[node.id] = nlevel  # Update it
@@ -217,6 +216,7 @@ def build_layers(root):
 
 """ Creates matrices for connecting consecutive layers to be used by the layer operation itself. """
 def build_connections(layers, levelDict, nvars):
+
     max_level = len(layers) - 1
 
     connections = [None]*(max_level + 1)
