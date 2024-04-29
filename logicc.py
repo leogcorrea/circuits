@@ -412,7 +412,7 @@ def test_probabilities(filename = 'smoke_pre.cnf'):
 if __name__ == '__main__':
 
     #if TESTS:
-    #test_configurations('digits.pasp')
+    #test_configurations()
     #test_probabilities()
 
     filename = sys.argv[1]
@@ -452,11 +452,24 @@ if __name__ == '__main__':
     lit2idx = lambda lit: lit-1
 
     probs = torch.ones(circuit.nliterals)
+    #probs = torch.FloatTensor(range(1, circuit.nliterals+1))/100.
+    
+    # probs[lit2idx(1)] = 0.2
+    # probs[lit2idx(2)] = 0.8
+    # probs[lit2idx(3)] = 0.1
+    # probs[lit2idx(4)] = 0.9
+
+
     #for lit in range(1, 4+1):
-    probs[lit2idx(1)] = 0.2
-    probs[lit2idx(2)] = 0.8
-    probs[lit2idx(3)] = 0.1
-    probs[lit2idx(4)] = 0.9
+    probs[lit2idx(1)] = 0.2 
+    probs[lit2idx(2)] = 0.35
+    probs[lit2idx(3)] = 0.45 
+    probs[lit2idx(4)] = 0.1
+    probs[lit2idx(5)] = 0.7  
+    probs[lit2idx(6)] = 0.2
+
+    print(probs)    
+    circuit.set_input_weights(probs)
 
     # for lit in range(1, 20+1):
     #     probs[lit2idx(lit)] = 0.01
@@ -464,10 +477,9 @@ if __name__ == '__main__':
     # probs[lit2idx(13)] = 0.42 
     # probs[lit2idx(18)] = 0.5 
         
-    circuit.set_input_weights(probs)
+    # circuit.set_input_weights(probs)
 
-
-    for lit in range(5, 7+1):
+    for lit in range(7, 11+1):
         input = [lit]
         start_time = time.time()
         output = circuit.infer(input)

@@ -1,0 +1,20 @@
+%0.2::digit(0,0).
+%0.8::digit(0,1).
+%0.1::digit(1,0).
+%0.9::digit(1,1).
+
+0.2::digit(0,0).
+0.35::digit(0,1).
+0.45::digit(0,2).
+0.1::digit(1,0).
+0.7::digit(1,1).
+0.2::digit(1,2).
+
+:-digit(X,Y),digit(X,Z),Y != Z.
+:-not digit(0,0),not digit(0,1), not digit(0,2).
+:-not digit(1,0),not digit(1,1), not digit(1,2).
+
+add(Z):-digit(A,X),digit(B,Y),Z = X+Y,A != B.
+
+#semantics maxent.
+#query add(Z)
