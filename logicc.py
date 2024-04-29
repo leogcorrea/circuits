@@ -33,6 +33,7 @@ class InputLayer(Layer):
     def set_gains(self, gains):
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
+        sel[sel>0] = 1.0
         self.gains = abs(sel) + (sel == 0).type(torch.float) 
         self.linear_tranform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
         self.gain_set = True
