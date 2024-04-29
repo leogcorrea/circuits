@@ -20,8 +20,8 @@ class Layer(nn.Module):
 class InputLayer(Layer):
     def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
-        self.linearTransform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linearTransform.weight = nn.Parameter(self.weight, requires_grad=False)
+        self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        #self.linear_tranform.weight = nn.Parameter(self.weight, requires_grad=False)
         self.negated = negated
         self.input_mask = input_mask
         self.gains = None
@@ -34,7 +34,7 @@ class InputLayer(Layer):
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
         self.gains = abs(sel) + (sel == 0).type(torch.float) 
-        self.linearTransform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
+        self.linear_tranform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
         self.gain_set = True
 
     """ Mask to obtain the negation of input literal according to the circuit setup """
@@ -54,7 +54,7 @@ class InputLayer(Layer):
             y = input[0]
             """ Or operates on the node states informed directly """
         if self.gain_set:
-            y = self.linearTransform(y)
+            y = self.linear_tranform(y)
         
         #y = torch.log(x)
         return y
@@ -64,11 +64,11 @@ class InputLayer(Layer):
 class AndLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
-        #self.linearTransform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linearTransform.weight = nn.Parameter(matrix, requires_grad=False)
+        #self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        #self.linear_tranform.weight = nn.Parameter(matrix, requires_grad=False)
 
     def forward(self, input):
-        #return self.linearTransform(input)
+        #return self.linear_tranform(input)
         x = torch.mul(self.weight, input)
         mask = (self.weight == 0)
         x += mask
@@ -79,12 +79,12 @@ class AndLayer(Layer):
 class OrLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
-        self.linearTransform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        self.linearTransform.weight = self.weight
+        self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        self.linear_tranform.weight = self.weight
 
     def forward(self, input):
         # x = torch.exp(input)
-        # x = self.linearTransform(x)
+        # x = self.linear_tranform(x)
         # y = torch.log(x)
         
         # # xx = torch.mul(self.weight, input)
@@ -92,7 +92,7 @@ class OrLayer(Layer):
         # # xx = xx + torch.tensor(torch.finfo().tiny)
         # # yy = torch.logsumexp(xx, dim=1)
 
-        return self.linearTransform(input)
+        return self.linear_tranform(input)
 
 
 """ Currently not being used. Could be use in the future for reading out the results of the circuit just calculated """
@@ -303,7 +303,7 @@ class LogicCircuit(nn.Sequential):
     def get_input_size(self):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
-        return self.layers[0].linearTransform.weight.size(dim=0)
+        return self.layers[0].linear_tranform.weight.size(dim=0)
     
     def infer(self, literals = []):
         if len(self.layers) == 0:
