@@ -87,25 +87,27 @@ class GroundProgram():
         # if string is empty, there's nothing to do
         if not program_str:
             return    
-        self._ground(program_str, weight_function)
+        self.symbol2literal = self._ground(program_str, weight_function)
 
-    def _ground(self, program_str:str, weight_function:Dict[str,float]) -> None:    
+    def _ground(self, program_str:str, weight_function:Dict[str,float]) -> dict:    
         # ground program
         control = clingo.Control()
         control.add("base", [], program_str)
         control.register_observer(Observer(self))
         control.ground([('base', [])]) 
-        self._process_output(control, weight_function)
+        return self._process_output(control, weight_function)
 
     def _process_output(self, control:clingo.Control, weight_function:Dict[str,float]) -> None:
-        print("Literal : program clause")
+        symbol2literal = {}
+
         # process output
         for sym in control.symbolic_atoms:
             symbol = str(sym.symbol)
             self._atom_to_txt[sym.literal] = symbol
             if symbol in weight_function:
                 self._atom_to_weight[sym.literal] = weight_function[symbol]
-            print(sym.literal, ": " + symbol)
+            symbol2literal[symbol] = sym.literal
+
         for r in self.rules: 
             if not(r.choice and len(r.head) > 0 and len(r.body) == 0 and self._atom_to_txt[abs(r.head[0])] in weight_function):
                 
@@ -117,6 +119,8 @@ class GroundProgram():
         choices = set(self._atom_to_weight.keys())
         if len(choices.intersection(self._derived_from.keys())) != 0:
             raise Exception("Syntax Error: Probabilistic choice unifies with rule head")
+
+        return symbol2literal
 
     def add_rule(self, choice: bool = False, head: Iterable[int] = [], body: Iterable[int] = []) -> None: # pylint: disable=dangerous-default-value
         self.rules.append(GroundRule(choice=choice, head=list(head), body=list(body)))

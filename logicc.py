@@ -306,7 +306,7 @@ class LogicCircuit(nn.Sequential):
             raise IndexError("No input layer defined")
         return self.layers[0].linear_tranform.weight.size(dim=0)
     
-    def infer(self, literals = []):
+    def query(self, literals = []):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         if len(literals):
@@ -326,11 +326,7 @@ class LogicCircuit(nn.Sequential):
     
 
 """ Main method to build a LogicCircuit instance based on a NNF file format """
-def build_circuit(filename):
-    rootId, _, nodeDict, nvars = nnf.parse(filename)
-
-    root = nodeDict[rootId]
-
+def build_circuit(root, nvars):
     layerSet, levelDict = build_layers(root)   
 
     connections, negated, input_mask = build_connections(layerSet, levelDict, nvars)
@@ -356,12 +352,17 @@ def build_circuit(filename):
 
     return LogicCircuit(layers, nvars)
 
+def build_circuit_from_file(filename):
+    rootId, _, nodeDict, nvars = nnf.parse(filename)
+    
+    return build_circuit(nodeDict[rootId], nvars)
+
 """ Given a file name with both CNF and NNF formats variations, generated a set of inputs and test them against the represented formulas """
 def test_configurations(filename = 'simple_w_constraint_opt'):
 
     clauses, nvars  = cnf.build(filename + '.cnf')
 
-    circuit = build_circuit(filename + '.nnf')
+    circuit = build_circuit_from_file(filename + '.nnf')
 
     nconf = 2 ** nvars
     
@@ -383,40 +384,56 @@ def test_configurations(filename = 'simple_w_constraint_opt'):
             print("\nInput: {}, Output1: {} Output2: {}".format(input, result1, result2))
 
 
-def test_probabilities(filename = 'smoke_pre.cnf'):
+def test_probabilities(filename, c2d_executable):
     EPSILON = 0.00005
 
-    circuit = build_circuit(filename + '.nnf')
+    filename, symbols = pasp2cnf(filename)
+    filename = cnf2nnf(filename, c2d_executable)
+    circuit = build_circuit_from_file(filename) # + '.nnf')
     print("Circuit being tested: ", filename + '.nnf')
+    
+    lit2idx = lambda lit: lit-1
+    sym2lit = lambda sym: symbols[sym] if not 'not' in sym else -symbols[sym.replace('not', '').lstrip()]
+    sym2idx = lambda sym: lit2idx(sym2lit(sym))
 
-    probs = torch.tensor([0.25, 0.25, 0.25, 0.2, 0.2, 0.3, 0.4, 1., 1., 1., 1., 1., 1., 1., 0.333, 0.4992503748125937, 1., 1., 1., 1., 1., 1., 1., 1.]) 
+    probs = torch.ones(circuit.nliterals)
+    probs[sym2idx('a(bill)')] = 0.25
+    probs[sym2idx('b(carol)')] = 0.25
+    probs[sym2idx('c(daniel)')] = 0.25
+    probs[sym2idx('d(carol,anna)')] = 0.2
+    probs[sym2idx('e(bill,anna)')] = 0.2
+    probs[sym2idx('influences(bill,anna)')] = 0.3
+    probs[sym2idx('influences(carol,anna)')] = 0.4
+    probs[sym2idx('stress(bill)')] = 0.333
+    probs[sym2idx('stress(carol)')] = 0.333
+    probs[sym2idx('stress(daniel)')] = 0.334
+    #probs = torch.tensor([0.25, 0.25, 0.25, 0.2, 0.2, 0.3, 0.4, 1., 1., 1., 1., 1., 1., 1., 0.333, 0.4992503748125937, 1., 1., 1., 1., 1., 1., 1., 1.]) 
+
     circuit.set_input_weights(probs)
 
-    output = circuit.infer([14])
+    #output = circuit.query([14])
+
+    output = circuit.query([sym2lit('smokes(anna)')]) #
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0117])) < EPSILON else " [REJECTED]")
 
-    b = circuit.infer([11])
-    output = ( circuit.infer([11, 14])) / b 
+    #b = circuit.query([11])
+    b = circuit.query([sym2lit('smokes(bill)')]) #
+
+    #output = ( circuit.query([11, 14])) / b 
+    output = ( circuit.query([sym2lit('smokes(anna)'), sym2lit('smokes(bill)')])) / b #smokes(anna)|smokes(bill)
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0600])) < EPSILON else " [REJECTED]")
 
-    b = circuit.infer([-9])
-    a = circuit.infer([-9, -14])
-    output= a/b
+    #b = circuit.query([-9])
+    #a = circuit.query([-9, -14])
+    b = circuit.query([sym2lit('not stress(carol)')])
+    a = circuit.query([sym2lit('not smokes(anna)'), sym2lit('not stress(carol)')])
+    output= a/b #not smokes(anna) | not stress(carol)
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.9925])) < EPSILON else " [REJECTED]")
 
-
-""" Usage examples """
-if __name__ == '__main__':
-
-    #if TESTS:
-    #test_configurations()
-    #test_probabilities()
-
-    filename = sys.argv[1]
-    c2d_executable = sys.argv[2]
+def pasp2cnf(filename):
     program_str = ''
     with open(filename) as infile:
         program_str = infile.read()
@@ -432,6 +449,9 @@ if __name__ == '__main__':
         with open(filename, "w") as outfile:
             outfile.write(str_cnf)
 
+    return filename, program.grounded_program.symbol2literal
+
+def cnf2nnf(filename, c2d_executable):
     process = Popen([c2d_executable, "-in", filename, "-dt_method", "4"], stdout=PIPE)
     (poutput, perr) = process.communicate()
     exit_code = process.wait()
@@ -442,52 +462,48 @@ if __name__ == '__main__':
         if perr:
             print(perr.decode("utf-8"))
         exit(exit_code)
+    
+    return filename + '.nnf'
+
+
+""" Usage examples """
+if __name__ == '__main__':
+    
+    TESTS = 1
+    if TESTS:
+        #test_configurations()
+        test_probabilities('smoke.pasp', sys.argv[2])
+
+    filename = sys.argv[1]
+    c2d_executable = sys.argv[2]
+
+    filename, sym2lit = pasp2cnf(filename)
+    filename = cnf2nnf(filename, c2d_executable)
 
     import time
     start_time = time.time()
 
-    circuit = build_circuit(filename + '.nnf')
-    print("Time to build the circuit (s): ", time.time() - start_time)
+    circuit = build_circuit_from_file(filename)
+    print("Circuit: ", filename)
+    print("Time to build the circuit: {} s".format(time.time() - start_time))
 
     lit2idx = lambda lit: lit-1
 
     probs = torch.ones(circuit.nliterals)
-    #probs = torch.FloatTensor(range(1, circuit.nliterals+1))/100.
+
+    for lit in range(1, 20+1):
+        probs[lit2idx(lit)] = 0.1 
     
-    # probs[lit2idx(1)] = 0.2
-    # probs[lit2idx(2)] = 0.8
-    # probs[lit2idx(3)] = 0.1
-    # probs[lit2idx(4)] = 0.9
-
-
-    #for lit in range(1, 4+1):
-    probs[lit2idx(1)] = 0.2 
-    probs[lit2idx(2)] = 0.35
-    probs[lit2idx(3)] = 0.45 
-    probs[lit2idx(4)] = 0.1
-    probs[lit2idx(5)] = 0.7  
-    probs[lit2idx(6)] = 0.2
-
-    print(probs)    
     circuit.set_input_weights(probs)
 
-    # for lit in range(1, 20+1):
-    #     probs[lit2idx(lit)] = 0.01
-    # probs[lit2idx(10)] = 0.91
-    # probs[lit2idx(13)] = 0.42 
-    # probs[lit2idx(18)] = 0.5 
-        
-    # circuit.set_input_weights(probs)
+    print("Weights (probabilities): ", probs)
 
-    for lit in range(7, 11+1):
+    for lit in range(21, 39+1):
         input = [lit]
         start_time = time.time()
-        output = circuit.infer(input)
-        print("Input (literals): ", input)
-        print("Output: ", output)
+        output = circuit.query(input)
+        print("Query (literal): ", input)
+        print("Result: ", output)
 
-    print("Time to compute inference (s): ", time.time() - start_time)
-    print("Circuit: ", filename + '.nnf')
-    #print("Input (literals): ", input)
-    #print("Output: ", output)
-    print("Weights(probabilities): ", probs)
+    print("Time to compute queries: {} s".format(time.time() - start_time))
+
