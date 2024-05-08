@@ -21,6 +21,12 @@ smokes(carol) :- stress(carol), b(carol).
 smokes(daniel) :- stress(daniel), c(daniel).
 smokes(anna) :- smokes(carol), influences(carol,anna), d(carol,anna).
 smokes(anna) :- smokes(bill), influences(bill,anna), e(bill,anna).
+
+:- stress(bill), stress(carol).
+:- stress(bill), stress(daniel).
+:- stress(carol), stress(daniel).
+:- not stress(bill), not stress(carol), not stress(daniel).
+
 % Query 1.
 #query smokes(anna).
 % Query 2.

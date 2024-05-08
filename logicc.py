@@ -26,16 +26,24 @@ class InputLayer(Layer):
         self.input_mask = input_mask
         self.gains = None
         self.gain_set = None
-        self.set_gains(gains)
+        self.set_gains(gains, [])
         self.gain_set = False
 
     """ Gains (weights) applied by the linear transform on the inputs """
-    def set_gains(self, gains):
+    def set_gains(self, gains, surrogate):
+        self.gains = gains
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
-        sel[sel>0] = 1.0
-        self.gains = abs(sel) + (sel == 0).type(torch.float) 
-        self.linear_tranform.weight = nn.Parameter(torch.matmul(torch.diag(self.gains), self.weight), requires_grad=False)
+        
+        idxs = torch.nonzero(self.input_mask[:, surrogate], as_tuple=True)[0]
+        
+        for i in idxs:
+            if sel[i] > 0:
+                sel[i] = 1.0
+ 
+        
+        xgains = abs(sel) + (sel == 0).type(torch.float) 
+        self.linear_tranform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False)
         self.gain_set = True
 
     """ Mask to obtain the negation of input literal according to the circuit setup """
@@ -294,13 +302,13 @@ class LogicCircuit(nn.Sequential):
         """ Calls the forward() method with two arguments, the input configuration and an input mask """
         return self((configuration, self.layers[0].input_mask, self.layers[0].negated))
 
-    """ Define gains or input weights most likely representing probabilities """
-    def set_input_weights(self, value):
+    """ Define gains or input weights representing probabilities. Surrogate defines probabilistic surrogate facts with negation equals to 1.0"""
+    def set_input_weights(self, value, surrogate = []):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
-        self.layers[0].set_gains(value)
+        self.layers[0].set_gains(value, surrogate)
         self.probnorm = self(torch.ones(1, self.get_input_size()))
-
+    
     def get_input_size(self):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
@@ -389,7 +397,7 @@ def test_probabilities(filename, c2d_executable):
 
     filename, symbols = pasp2cnf(filename)
     filename = cnf2nnf(filename, c2d_executable)
-    circuit = build_circuit_from_file(filename) # + '.nnf')
+    circuit = build_circuit_from_file(filename)
     print("Circuit being tested: ", filename + '.nnf')
     
     lit2idx = lambda lit: lit-1
@@ -407,29 +415,32 @@ def test_probabilities(filename, c2d_executable):
     probs[sym2idx('stress(bill)')] = 0.333
     probs[sym2idx('stress(carol)')] = 0.333
     probs[sym2idx('stress(daniel)')] = 0.334
-    #probs = torch.tensor([0.25, 0.25, 0.25, 0.2, 0.2, 0.3, 0.4, 1., 1., 1., 1., 1., 1., 1., 0.333, 0.4992503748125937, 1., 1., 1., 1., 1., 1., 1., 1.]) 
 
-    circuit.set_input_weights(probs)
+    idx1 = sym2idx('stress(bill)')
+    idx2 = sym2idx('stress(carol)')
+    idx3 = sym2idx('stress(daniel)')
+    surrogate = [idx1, idx2, idx3]
 
-    #output = circuit.query([14])
+    circuit.set_input_weights(probs, surrogate)
 
-    output = circuit.query([sym2lit('smokes(anna)')]) #
+    output = circuit.query([sym2lit('smokes(anna)')])
+
+    print("Query: ", 'smokes(anna)')
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0117])) < EPSILON else " [REJECTED]")
 
-    #b = circuit.query([11])
-    b = circuit.query([sym2lit('smokes(bill)')]) #
+    b = circuit.query([sym2lit('smokes(bill)')])
+    output = ( circuit.query([sym2lit('smokes(anna)'), sym2lit('smokes(bill)')])) / b
 
-    #output = ( circuit.query([11, 14])) / b 
-    output = ( circuit.query([sym2lit('smokes(anna)'), sym2lit('smokes(bill)')])) / b #smokes(anna)|smokes(bill)
+    print("Query: ", 'smokes(anna) | smokes(bill)')
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0600])) < EPSILON else " [REJECTED]")
 
-    #b = circuit.query([-9])
-    #a = circuit.query([-9, -14])
     b = circuit.query([sym2lit('not stress(carol)')])
     a = circuit.query([sym2lit('not smokes(anna)'), sym2lit('not stress(carol)')])
-    output= a/b #not smokes(anna) | not stress(carol)
+    output= a/b
+
+    print("Query: ", 'not smokes(anna) | not stress(carol)')
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.9925])) < EPSILON else " [REJECTED]")
 
@@ -471,7 +482,7 @@ if __name__ == '__main__':
     
     TESTS = 1
     if TESTS:
-        #test_configurations()
+        test_configurations()
         test_probabilities('smoke.pasp', sys.argv[2])
 
     filename = sys.argv[1]
@@ -499,10 +510,13 @@ if __name__ == '__main__':
     print("Weights (probabilities): ", probs)
 
     for lit in range(21, 39+1):
-        input = [lit]
         start_time = time.time()
-        output = circuit.query(input)
-        print("Query (literal): ", input)
+        output = circuit.query([lit])
+        clause = ""
+        for k,v in sym2lit.items():
+            if v == lit:
+                clause = k 
+        print("Query: ", clause)
         print("Result: ", output)
 
     print("Time to compute queries: {} s".format(time.time() - start_time))
