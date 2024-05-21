@@ -7,17 +7,20 @@ from collections import deque
 import sys
 from subprocess import Popen, PIPE
 
-""" Base class for the probabilistic circuit. Represents an abstract layer.  """
+
 class Layer(nn.Module):
+    """ Base class for the probabilistic circuit. Represents an abstract layer.  """
     def __init__(self, id, matrix):
         super().__init__()
         self.id = id
         self.weight = nn.Parameter(matrix, requires_grad=False)
 
-""" The input layer which operates a linear transform on the inputs. It receives: 
+
+class InputLayer(Layer):
+    """ The input layer which operates a linear transform on the inputs. It receives: 
     a) an input configuration (comprising literal values); or 
     b) the input node values themselves. """
-class InputLayer(Layer):
+
     def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
         self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
@@ -30,36 +33,41 @@ class InputLayer(Layer):
         self.gain_set = None
         self.set_gains(gains, [])
         self.gain_set = False
-        
-
-    """ Gains (weights) applied by the linear transform on the inputs """
+    
     def set_gains(self, gains, surrogate):
-        self.gains = gains
-        xgains = torch.matmul(self.input_mask, gains)
-        sel = self.negated - xgains
-        idxs = torch.nonzero(self.input_mask[:, surrogate], as_tuple=True)[0]  
+        """ Gains (weights) applied by the linear transform on the inputs """
+        self.gains = gains # store gains for future reference
+        xgains = torch.matmul(self.input_mask, gains) # map gain values to internal nodes organization
+        sel = self.negated - xgains # build a negation mask for gains
+        # select those node acting as surrogate facts for annotated disjunctions 
+        idxs = torch.nonzero(self.input_mask[:, surrogate], as_tuple=True)[0] 
         if len(idxs):
-            sel[idxs] = torch.where(sel[idxs] > 0, 1, sel[idxs])
+            sel[idxs] = torch.where(sel[idxs] > 0, 1, sel[idxs]) # the surrogate facts have their negation equalled to 1.0
         
-        xgains = abs(sel) + (sel == 0).float() 
-        self.linear_transform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False)
+        xgains = abs(sel) + (sel == 0).float() # applies the negation mask to gains
+        # set the linear transform accordingly
+        self.linear_transform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False) 
         self.gain_set = True
 
-    """ Mask to obtain the negation of input literal according to the circuit setup """
+    
     def set_negated(self, value):
+        """ Mask to obtain the negation of input literal according to the circuit setup """
         self.negated = value
 
-    """ The linear transform application """
+    
     def forward(self, input):
+        """ The linear transform application """
+
         if len(input) > 1:
-            """ Transforms literal values into node states according to the circuit setup """
+            # transforms literal values into internal node states according to the circuit setup
             configuration = input[0]
             negated = input[1]
-            x = torch.matmul(configuration, self._mask)
-            y = abs(negated - x)
+            x = torch.matmul(configuration, self._mask) # transform the input to a internal state vector
+            y = abs(negated - x) # aplies a negation mask to the nodes
+
         else:
-            y = input[0]
-            """ Or operates on the node states informed directly """
+            # or operates on the node states directly
+            y = input[0] 
         if self.gain_set:
             y = self.linear_transform(y)
         
@@ -67,8 +75,9 @@ class InputLayer(Layer):
         return y
     
 
-""" A circuit layer which calculate an AND operation (product) of the input """
 class AndLayer(Layer):
+    """ A circuit layer which calculate an AND operation (product) of the input """
+
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
         #self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
@@ -77,14 +86,16 @@ class AndLayer(Layer):
         
     def forward(self, input):
         #return self.linear_transform(input)
-        x = torch.mul(self.weight, input)
-        #mask = (self.weight == 0)
-        x += self._mask
+        x = torch.mul(self.weight, input) # transform input to the layer internal state 
+        # set zero-valued elements to one so as to make them act as neutral elements in the product of columns calculated next
+        x += self._mask 
         y = torch.prod(x, dim = 1)
         return y
 
-""" A OR layer which sum up the input """
+
 class OrLayer(Layer):
+    """ A OR layer which sum up the input """
+
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
         self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
@@ -100,11 +111,12 @@ class OrLayer(Layer):
         # # xx = xx + torch.tensor(torch.finfo().tiny)
         # # yy = torch.logsumexp(xx, dim=1)
 
+        # apply a simple linear transform to sum-up input elements (internally bringing input to the internal layer representation)
         return self.linear_transform(input)
 
 
-""" Currently not being used. Could be use in the future for reading out the results of the circuit just calculated """
 class OutputLayer(OrLayer):
+    """ Currently not being used. Could be use in the future for reading out the results of the circuit just calculated """
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
 
@@ -114,8 +126,8 @@ class OutputLayer(OrLayer):
         return y
     
 
-""" Get the max level (depth in terms of layers) found in the circuit """
 def get_max_level(node, level = 0):
+    """ Get the max level (depth in terms of layers) found in the circuit """
     max_level = level
     for child in node.children:
         l = get_max_level(child, level+1)
@@ -123,13 +135,14 @@ def get_max_level(node, level = 0):
             max_level = l
     return max_level
     
-""" Determines the depth level (an increasing integer, zero based) in which each NNF node appears in the circuit.
+
+def populate_levels(node, levels, level = 0):
+    """ Determines the depth level (an increasing integer, zero based) in which each NNF node appears in the circuit.
     Input: 
         node: the NNF node to start from
         levels: a possibly empty dict of levels associating each node ID to a integer value (the level)
     Output: a populated dict of levels 
-"""
-def populate_levels(node, levels, level = 0):
+    """
     if node.id in levels:
         current = levels[node.id]
         if current < level:
@@ -140,14 +153,18 @@ def populate_levels(node, levels, level = 0):
     for child in node.children:
         populate_levels(child, levels, level+1)
 
-""" Construct a dict of levels and related sets of nodes separating them in layers and organized as intercaling OR and AND layers. 
+
+def build_layers(root):
+    """ Construct a dict of levels and related sets of nodes separating them in layers and organized as intercaling OR and AND layers. 
     May possibly create the so called 'virtual nodes' to aggregate multiple nodes in one layer belonging to the same
     layer operation (OR or AND).
 
     Input: 
         root: NNF node of the tree representing the circuit
-"""
-def build_layers(root):
+    Output:
+        layers: a dict of layer level (0-based, increasing integers) to Node sets
+        levels: a dict of Node ids to layer levels (0-based, increasing integers)
+    """
     levels = {}
     populate_levels(root, levels)
 
@@ -222,8 +239,18 @@ def build_layers(root):
 
     return layers, levels
 
-""" Creates matrices for connecting consecutive layers of the circuit. """
+
 def build_connections(layers, levelDict, nvars):
+    """ Creates matrices for connecting consecutive layers of the circuit. 
+
+    Inputs:
+        layers: a dict of layer ids to node sets
+        levelDict: a dict of node ids to layer ids
+        nvars: number of literals in the circuit
+    Outputs: 
+        connections: the connection matrices for each layer 
+        negated: mask to obtain negation of input values
+        input_mask: mask to transform input values into node states """
 
     max_level = len(layers) - 1
 
@@ -281,10 +308,11 @@ def build_connections(layers, levelDict, nvars):
 
     return connections, negated, input_mask
 
-""" A Logic circuit is a sequence of intercalating OR and AND layers operating on a sequence of literal values (via evaluate() method) 
-    or an initial node setup as input (via __call__() operator which is dispatched to the inherited forward() method of nn.Sequential)
- """
+
 class LogicCircuit(nn.Sequential):
+    """ A Logic circuit is a sequence of intercalating OR and AND layers. It can be operated on a sequence of node values 
+   (via evaluate() method) or on a sequence of literals for inference (via query() method)
+    """
     def __init__(self, layers, nliterals):
         super().__init__()
         self.layers = layers
@@ -298,28 +326,42 @@ class LogicCircuit(nn.Sequential):
         super().to(device)
         self._device = device
 
-    """ Calls the input layer with a configuration of literal values """
     def evaluate(self, configuration):
+        """ Calls the input layer with a configuration of node values
+        Input:
+            configuration: an input torch.tensor with dimensions given by a call to the get_input_size() method
+        Output:
+            a float point torch.tensor representing the circuit output
+        """
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
 
-        """ Calls the forward() method with two arguments, the input configuration and an input mask """
+        """ Calls the forward() method with two arguments, the input configuration and an negation mask """
         return self((configuration, self.layers[0].negated))
 
-    """ Define gains or input weights representing probabilities. Surrogate defines probabilistic surrogate facts with negation equals to 1.0"""
     def set_input_weights(self, value, surrogate = []):
+        """ Define gains or input weights representing probabilities. Surrogate defines probabilistic surrogate facts with negation equals to 1.0"""
+        
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value, surrogate)
         ones = torch.ones(1, self.get_input_size()).to(self._device)
         self.probnorm = self(ones)
-    
+   
     def get_input_size(self):
+        """ Returns the expected size of an input configuration """
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         return self.layers[0].linear_transform.weight.size(dim=0)
-    
+   
     def query(self, literals = []):
+        """ Makes an inference or query for the provided literals
+        Input:
+            literals: a list of numerical positive literals ids
+        Output:
+            normalized probability of query
+        """ 
+
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         
@@ -336,8 +378,10 @@ class LogicCircuit(nn.Sequential):
         return self((conf, neg)) / self.probnorm
     
 
-""" Main method to build a LogicCircuit instance based on a NNF file format """
+
 def build_circuit(root, nvars):
+    """ Main method to build a LogicCircuit instance given a NNF root node and the number of literals """
+
     layerSet, levelDict = build_layers(root)   
 
     connections, negated, input_mask = build_connections(layerSet, levelDict, nvars)
@@ -363,13 +407,17 @@ def build_circuit(root, nvars):
 
     return LogicCircuit(layers, nvars)
 
+
 def build_circuit_from_file(filename):
+    """ Main method to build a LogicCircuit out of a NNF file """
+
     rootId, _, nodeDict, nvars = nnf.parse(filename)
     
     return build_circuit(nodeDict[rootId], nvars)
 
-""" Given a file name with both CNF and NNF formats variations, generated a set of inputs and test them against the represented formulas """
+
 def test_configurations(filename = 'simple_w_constraint_opt'):
+    """ Given a file name with both CNF and NNF formats variations, generate a set of inputs and test them against the represented formulas """
 
     clauses, nvars  = cnf.build(filename + '.cnf')
 
@@ -394,10 +442,16 @@ def test_configurations(filename = 'simple_w_constraint_opt'):
         if result1 or result2:
             print("\nInput: {}, Output1: {} Output2: {}".format(input, result1, result2))
 
+
 def make_query(expr, symbols):
+    """ Helper function to make a query given a expression and a dict of symbols """
     return [symbols[expr] if not 'not' in expr else -symbols[expr.replace('not', '').lstrip()]]
 
-def test_probabilities(filename, c2d_executable):
+
+def test_probabilities(c2d_executable):
+    """ Tester function to the ASP program given in the file smoke.pasp. Expects a path to the c2d compiler """
+
+    filename = 'smoke.pasp'
     EPSILON = 0.00005
 
     filename, symbols = pasp2cnf(filename)
@@ -449,7 +503,9 @@ def test_probabilities(filename, c2d_executable):
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.9925])) < EPSILON else " [REJECTED]")
 
+
 def pasp2cnf(filename):
+    """ Given an ASP (or annotated ASP) program, outputs a CNF form of it with a dict of symbols (clauses in the program) """
     program_str = ''
     with open(filename) as infile:
         program_str = infile.read()
@@ -467,7 +523,9 @@ def pasp2cnf(filename):
 
     return filename, program.grounded_program.symbol2literal
 
+
 def cnf2nnf(filename, c2d_executable):
+    """ Given a CNF as an input file, writes out a NNF version of it. """
     process = Popen([c2d_executable, "-in", filename, "-dt_method", "4"], stdout=PIPE)
     (poutput, perr) = process.communicate()
     exit_code = process.wait()
@@ -482,16 +540,17 @@ def cnf2nnf(filename, c2d_executable):
     return filename + '.nnf'
 
 
-""" Usage examples """
+
 if __name__ == '__main__':
-    
+    """ Usage example """
+
     TESTS = 1
     if TESTS:
         test_configurations()
-        test_probabilities('smoke.pasp', sys.argv[2])
+        test_probabilities(sys.argv[2])
 
-    filename = sys.argv[1]
-    c2d_executable = sys.argv[2]
+    filename = sys.argv[1] # path to digits.pasp
+    c2d_executable = sys.argv[2] # path to c2d executable
 
     filename, sym2lit = pasp2cnf(filename)
     filename = cnf2nnf(filename, c2d_executable)

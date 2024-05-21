@@ -1,5 +1,6 @@
 
 class Node():
+    """ Abstract base node """
     def __init__(self, id, children):
         super().__init__()
         self.id = id
@@ -15,17 +16,20 @@ class Node():
         return self.id
 
 class AndNode(Node):
+    """ AND node in a NNF """
     def __init__(self, id, children):
         super().__init__(id, children)
 
 
 class OrNode(Node):
+    """ OR node in a NNF """
     def __init__(self, id, children, conflictingVar = 0):
         super().__init__(id, children)
         self.conflictingVar = conflictingVar
  
 
 class LiteralNode(Node):
+     """ LITERAL node in a NNF """
      def __init__(self, id, literal, negated = False):
         super().__init__(id, [])
         self.literal = literal
@@ -92,7 +96,7 @@ def _parseNodes(filename):
 
 
 def parse(filename):
-
+    """ Parse an input NNF file into a tree of nodes """
     rootId, allNodes, nodeDict, nvars = _parseNodes(filename)
 
     for nodeId, nodeInfo in enumerate(allNodes):

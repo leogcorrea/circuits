@@ -109,18 +109,16 @@ def operate(nn_model, pc_model, query_builder, device, data_loader):
     nn_model.eval()
     test_loss = 0
     correct = 0
-    
+    n = 19    
     queries = []
-    for k in range(0, 19):
+    for k in range(0, n):
         queries.append(query_builder( f"add({k})" ))
     s = len(data_loader.dataset)//2
-    n = 19
     m = 20
     b = 1
-    d = 0
     probs = torch.ones(500, circuit.nliterals).to(device)
-    with torch.no_grad():
-        
+
+    with torch.no_grad():        
         for data, target in data_loader:
             start = time.time()
             print("\rBatch {} of {}".format(b, 10))
@@ -133,12 +131,8 @@ def operate(nn_model, pc_model, query_builder, device, data_loader):
             tgt = torch.add(target[:h], target[h:]).float().to(device)
             probs[:, 0:m] = torch.concat((output[:h], output[h:]), dim = 1)
 
-            for i, (p, t) in enumerate(zip(probs, tgt)): 
-                #probs[0:m] = torch.concat((prob1, prob2)) #.to(device)
+            for i, (p, _) in enumerate(zip(probs, tgt)): 
                 pc_model.set_input_weights(p)
-                #expr = f"add({prob1.argmax(keepdim=True).item() + prob2.argmax(keepdim=True).item()})"
-                #pred = pc_model.query(query_builder(expr))
-
                 q = torch.empty(n)
                 for k in range(0, n):
                    q[k] = pc_model.query(queries[k])
@@ -161,7 +155,7 @@ def operate(nn_model, pc_model, query_builder, device, data_loader):
 
 if __name__ == '__main__':
     epochs = 10
-    use_cuda = False# torch.cuda.is_available()
+    use_cuda = torch.cuda.is_available()
     use_mps = torch.backends.mps.is_available()
 
     torch.manual_seed(1)
