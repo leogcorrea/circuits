@@ -20,30 +20,29 @@ class Layer(nn.Module):
 class InputLayer(Layer):
     def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
-        self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linear_tranform.weight = nn.Parameter(self.weight, requires_grad=False)
-        self.negated = negated
-        self.input_mask = input_mask
-        self.gains = None
+        self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        #self.linear_transform.weight = nn.Parameter(self.weight, requires_grad=False)
+  
+        self.register_buffer("negated", negated)
+        self.register_buffer("input_mask", input_mask)
+        self.register_buffer("_mask", input_mask.t())
+        self.register_buffer("gains", None)
         self.gain_set = None
         self.set_gains(gains, [])
         self.gain_set = False
+        
 
     """ Gains (weights) applied by the linear transform on the inputs """
     def set_gains(self, gains, surrogate):
         self.gains = gains
         xgains = torch.matmul(self.input_mask, gains)
         sel = self.negated - xgains
+        idxs = torch.nonzero(self.input_mask[:, surrogate], as_tuple=True)[0]  
+        if len(idxs):
+            sel[idxs] = torch.where(sel[idxs] > 0, 1, sel[idxs])
         
-        idxs = torch.nonzero(self.input_mask[:, surrogate], as_tuple=True)[0]
-        
-        for i in idxs:
-            if sel[i] > 0:
-                sel[i] = 1.0
- 
-        
-        xgains = abs(sel) + (sel == 0).type(torch.float) 
-        self.linear_tranform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False)
+        xgains = abs(sel) + (sel == 0).float() 
+        self.linear_transform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False)
         self.gain_set = True
 
     """ Mask to obtain the negation of input literal according to the circuit setup """
@@ -55,15 +54,14 @@ class InputLayer(Layer):
         if len(input) > 1:
             """ Transforms literal values into node states according to the circuit setup """
             configuration = input[0]
-            mask = input[1].t()
-            negated = input[2]
-            x = torch.matmul(configuration, mask)
+            negated = input[1]
+            x = torch.matmul(configuration, self._mask)
             y = abs(negated - x)
         else:
             y = input[0]
             """ Or operates on the node states informed directly """
         if self.gain_set:
-            y = self.linear_tranform(y)
+            y = self.linear_transform(y)
         
         #y = torch.log(x)
         return y
@@ -73,14 +71,15 @@ class InputLayer(Layer):
 class AndLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
-        #self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linear_tranform.weight = nn.Parameter(matrix, requires_grad=False)
-
+        #self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        #self.linear_transform.weight = nn.Parameter(matrix, requires_grad=False)
+        self.register_buffer("_mask", (matrix == 0))
+        
     def forward(self, input):
-        #return self.linear_tranform(input)
+        #return self.linear_transform(input)
         x = torch.mul(self.weight, input)
-        mask = (self.weight == 0)
-        x += mask
+        #mask = (self.weight == 0)
+        x += self._mask
         y = torch.prod(x, dim = 1)
         return y
 
@@ -88,12 +87,12 @@ class AndLayer(Layer):
 class OrLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
-        self.linear_tranform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        self.linear_tranform.weight = self.weight
+        self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
+        self.linear_transform.weight = self.weight
 
     def forward(self, input):
         # x = torch.exp(input)
-        # x = self.linear_tranform(x)
+        # x = self.linear_transform(x)
         # y = torch.log(x)
         
         # # xx = torch.mul(self.weight, input)
@@ -101,7 +100,7 @@ class OrLayer(Layer):
         # # xx = xx + torch.tensor(torch.finfo().tiny)
         # # yy = torch.logsumexp(xx, dim=1)
 
-        return self.linear_tranform(input)
+        return self.linear_transform(input)
 
 
 """ Currently not being used. Could be use in the future for reading out the results of the circuit just calculated """
@@ -223,7 +222,7 @@ def build_layers(root):
 
     return layers, levels
 
-""" Creates matrices for connecting consecutive layers to be used by the layer operation itself. """
+""" Creates matrices for connecting consecutive layers of the circuit. """
 def build_connections(layers, levelDict, nvars):
 
     max_level = len(layers) - 1
@@ -293,6 +292,11 @@ class LogicCircuit(nn.Sequential):
             self.append(layer)
         self.nliterals = nliterals
         self.probnorm = 1.0
+        self._device = torch.device("cpu")
+
+    def to(self, device):
+        super().to(device)
+        self._device = device
 
     """ Calls the input layer with a configuration of literal values """
     def evaluate(self, configuration):
@@ -300,37 +304,36 @@ class LogicCircuit(nn.Sequential):
             raise IndexError("No input layer defined")
 
         """ Calls the forward() method with two arguments, the input configuration and an input mask """
-        return self((configuration, self.layers[0].input_mask, self.layers[0].negated))
+        return self((configuration, self.layers[0].negated))
 
     """ Define gains or input weights representing probabilities. Surrogate defines probabilistic surrogate facts with negation equals to 1.0"""
     def set_input_weights(self, value, surrogate = []):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value, surrogate)
-        self.probnorm = self(torch.ones(1, self.get_input_size()))
+        ones = torch.ones(1, self.get_input_size()).to(self._device)
+        self.probnorm = self(ones)
     
     def get_input_size(self):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
-        return self.layers[0].linear_tranform.weight.size(dim=0)
+        return self.layers[0].linear_transform.weight.size(dim=0)
     
     def query(self, literals = []):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
+        
+        conf = torch.ones(1, self.nliterals).to(self._device)
+        neg = torch.zeros_like(self.layers[0].negated).to(self._device)
+
         if len(literals):
-            lit = torch.abs(torch.tensor(literals)) - 1
-            idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0]
-        else:
-            idxs = []
-        neg = torch.zeros_like(self.layers[0].negated)
-        neg[idxs] = self.layers[0].negated[idxs]
-        conf = torch.ones(1, self.nliterals)
+             literals = torch.tensor(literals).to(self._device)
+             lit = torch.abs(torch.tensor(literals)) - 1
+             conf[0, lit[literals < 0]] = 0.0
+             idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0].to(self._device)
+             neg[idxs] = self.layers[0].negated[idxs]
 
-        for l in literals:
-            if l < 0:
-                conf[0,abs(l)-1] = 0.0
-
-        return self((conf, self.layers[0].input_mask, neg)) / self.probnorm
+        return self((conf, neg)) / self.probnorm
     
 
 """ Main method to build a LogicCircuit instance based on a NNF file format """
@@ -391,6 +394,8 @@ def test_configurations(filename = 'simple_w_constraint_opt'):
         if result1 or result2:
             print("\nInput: {}, Output1: {} Output2: {}".format(input, result1, result2))
 
+def make_query(expr, symbols):
+    return [symbols[expr] if not 'not' in expr else -symbols[expr.replace('not', '').lstrip()]]
 
 def test_probabilities(filename, c2d_executable):
     EPSILON = 0.00005
