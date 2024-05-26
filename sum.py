@@ -1,11 +1,9 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 import logicc
-from itertools import pairwise
 import time
 
 # Digit classification network definition.
@@ -36,39 +34,10 @@ class Net(torch.nn.Module):
     return x
   
 
-  # Retrieve the MNIST data.
-def mnist_data():
-  train = datasets.MNIST(root = "../data", train = True, download = True)
-  test  = datasets.MNIST(root = "../data", train = False, download = True)
-  return train.data.float().reshape(len(train), 1, 28, 28)/255., train.targets, \
-         test.data.float().reshape(len(test), 1, 28, 28)/255., test.targets
-
-# Normalization function to center pixel values around mu with standard deviation sigma.
-def normalize(X_R, Y_R, X_T, Y_T, mu, sigma):
-  return (X_R-mu)/sigma, Y_R, (X_T-mu)/sigma, Y_T
-
-# Whether to pick the first or second half of the dataset.
-def pick_slice(data, digit):
-  h = len(data)//2
-  return slice(h, len(data)) if digit else slice(0, h)
-
-# MNIST images for the train set.
-def mnist_data_select(digit, dataset): return dataset[pick_slice(dataset, digit)]
-
-# Observed atoms for training.
-def mnist_labels(dataset):
-  # We join the two halves (top and bottom) of MNIST and join them together to get
-  # two digits side by side. The labels are atoms encoding the sum of the two digits.
-  labels = torch.concatenate((dataset[:(h := len(dataset)//2)].reshape(-1, 1),
-                              dataset[h:].reshape(-1, 1)), axis=1)
-  return [[f"sum({x.item() + y.item()})"] for x, y in labels]
-
-
 def train(model, device, train_loader, optimizer, epoch):
     model.train()
-    #for batch_idx, (data, target) in enumerate(zip(train_x, train_y)):
     for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device) #torch.tensor([target]).to(device)
+        data, target = data.to(device), target.to(device) 
         optimizer.zero_grad()
         output = model(data)
         loss = F.nll_loss(output, target)
@@ -124,7 +93,9 @@ def operate(nn_model, pc_model, query_builder, device, data_loader):
             print("\rBatch {} of {}".format(b, 10))
             b+=1
             data, target = data.to(device), target.to(device)
+            nt = time.time()
             output = nn_model(data)
+            print("NN eval time: ",  time.time() - nt)
             h = output.size(dim=0)//2
 
             pred = torch.empty(h).to(device)
@@ -132,13 +103,16 @@ def operate(nn_model, pc_model, query_builder, device, data_loader):
             probs[:, 0:m] = torch.concat((output[:h], output[h:]), dim = 1)
 
             for i, (p, _) in enumerate(zip(probs, tgt)): 
+                r =time.time()
                 pc_model.set_input_weights(p)
                 q = torch.empty(n)
                 for k in range(0, n):
                    q[k] = pc_model.query(queries[k])
                 pred[i] = q.argmax(keepdim=True)
+                rf = time.time() - r
+                print("Time to query (19 queries): ", rf)
             elapsed = time.time() - start
-            print("Elapsed time:", elapsed)
+            print("Batch elapsed time:", elapsed)
 
             #test_loss += F.nll_loss(pred, tgt, reduction='sum').item()  # sum up batch loss
             test_loss += F.cross_entropy(pred, tgt)

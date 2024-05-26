@@ -6,7 +6,7 @@ from pasp2cnf.program import Program
 from collections import deque
 import sys
 from subprocess import Popen, PIPE
-
+from os import getcwd
 
 class Layer(nn.Module):
     """ Base class for the probabilistic circuit. Represents an abstract layer.  """
@@ -157,8 +157,15 @@ def populate_levels(node, levels, level = 0):
 def build_layers(root):
     """ Construct a dict of levels and related sets of nodes separating them in layers and organized as intercaling OR and AND layers. 
     May possibly create the so called 'virtual nodes' to aggregate multiple nodes in one layer belonging to the same
-    layer operation (OR or AND).
+    layer operation (OR or AND). 
 
+    Algorithm insights:
+        The algorithm transform individual nodes in layers of nodes operating the same (AND/OR) logical function on nodes with similar types. 
+        In order to organize the layers types, it starts by assigning the first layer the type of the root node. From there down on the node tree,
+        it alternates between AND/OR layer types, adding a current processed node to the current layer if its type is the same of that of the layer
+        or creating a 'virtual node' with only one child (the node itself) so as to delegate to the next layer the operation on the referred
+        node. The algorithm outputs a dictionary of layers containing sets of nodes in each layer and a index of levels where each node is located
+        inside this layering organization. 
     Input: 
         root: NNF node of the tree representing the circuit
     Output:
@@ -241,11 +248,14 @@ def build_layers(root):
 
 
 def build_connections(layers, levelDict, nvars):
-    """ Creates matrices for connecting consecutive layers of the circuit. 
-
+    """ Creates matrices for connecting consecutive layers of the circuit. The matrices have elements equal to 1 if there exists
+    a connection between a i-th node of the current layer to the j-th node of the next layer (i: row index, j: column index)
+    and 0 elsewhere.
+        The 'negated' mask output is used to keep track of input nodes with a negated value of the corresponding literal.
+        The 'input_mask' is used to transform a node input to the circuit internal state.  
     Inputs:
-        layers: a dict of layer ids to node sets
-        levelDict: a dict of node ids to layer ids
+        layers: a dict of layer ids and node sets
+        levelDict: a index (dict) of node ids to layer ids
         nvars: number of literals in the circuit
     Outputs: 
         connections: the connection matrices for each layer 
@@ -310,8 +320,10 @@ def build_connections(layers, levelDict, nvars):
 
 
 class LogicCircuit(nn.Sequential):
-    """ A Logic circuit is a sequence of intercalating OR and AND layers. It can be operated on a sequence of node values 
-   (via evaluate() method) or on a sequence of literals for inference (via query() method)
+    """ A Logic circuit is a sequence of intercalating OR/AND layers. It can be operated on a sequence of input node values 
+   (via evaluate() method) or on a sequence of literals intended for making a probabilistic inference (via query() method).
+   By associating weights to the inputs, this can be interpreted as probabilistic evidence on input literals, and then the 
+   circuit behaves as a probabilistic inference calculator.
     """
     def __init__(self, layers, nliterals):
         super().__init__()
@@ -323,6 +335,7 @@ class LogicCircuit(nn.Sequential):
         self._device = torch.device("cpu")
 
     def to(self, device):
+        """ Used to move the circuit to the CPU/GPU """
         super().to(device)
         self._device = device
 
@@ -340,7 +353,8 @@ class LogicCircuit(nn.Sequential):
         return self((configuration, self.layers[0].negated))
 
     def set_input_weights(self, value, surrogate = []):
-        """ Define gains or input weights representing probabilities. Surrogate defines probabilistic surrogate facts with negation equals to 1.0"""
+        """ Define gains or input weights representing probabilities. 
+        Surrogate defines probabilistic surrogate facts with negation equals to 1.0 (used to implement annotaded disjunctions)"""
         
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
@@ -357,7 +371,7 @@ class LogicCircuit(nn.Sequential):
     def query(self, literals = []):
         """ Makes an inference or query for the provided literals
         Input:
-            literals: a list of numerical positive literals ids
+            literals: a list of numerical literals ids
         Output:
             normalized probability of query
         """ 
@@ -370,7 +384,7 @@ class LogicCircuit(nn.Sequential):
 
         if len(literals):
              literals = torch.tensor(literals).to(self._device)
-             lit = torch.abs(torch.tensor(literals)) - 1
+             lit = torch.abs(literals) - 1
              conf[0, lit[literals < 0]] = 0.0
              idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0].to(self._device)
              neg[idxs] = self.layers[0].negated[idxs]
@@ -544,44 +558,10 @@ def cnf2nnf(filename, c2d_executable):
 if __name__ == '__main__':
     """ Usage example """
 
+    filename = sys.argv[1] if len(sys.argv) > 1 else  getcwd() + '/digits.pasp'
+    c2d_executable = sys.argv[2] if len(sys.argv) > 2 else getcwd() + '/c2d_linux'
+
     TESTS = 1
     if TESTS:
         test_configurations()
-        test_probabilities(sys.argv[2])
-
-    filename = sys.argv[1] # path to digits.pasp
-    c2d_executable = sys.argv[2] # path to c2d executable
-
-    filename, sym2lit = pasp2cnf(filename)
-    filename = cnf2nnf(filename, c2d_executable)
-
-    import time
-    start_time = time.time()
-
-    circuit = build_circuit_from_file(filename)
-    print("Circuit: ", filename)
-    print("Time to build the circuit: {} s".format(time.time() - start_time))
-
-    lit2idx = lambda lit: lit-1
-
-    probs = torch.ones(circuit.nliterals)
-
-    for lit in range(1, 20+1):
-        probs[lit2idx(lit)] = 0.1 
-    
-    circuit.set_input_weights(probs)
-
-    print("Weights (probabilities): ", probs)
-
-    for lit in range(21, 39+1):
-        start_time = time.time()
-        output = circuit.query([lit])
-        clause = ""
-        for k,v in sym2lit.items():
-            if v == lit:
-                clause = k 
-        print("Query: ", clause)
-        print("Result: ", output)
-
-    print("Time to compute queries: {} s".format(time.time() - start_time))
-
+        test_probabilities(c2d_executable)
