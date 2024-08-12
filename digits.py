@@ -31,7 +31,7 @@ if __name__ == '__main__':
 
     for lit in range(21, 39+1):
         start_time = time.time()
-        output = circuit.query([lit])
+        output = circuit.query(torch.tensor(lit))
         clause = ""
         for k,v in sym2lit.items():
             if v == lit:

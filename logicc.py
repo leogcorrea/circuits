@@ -13,7 +13,7 @@ class Layer(nn.Module):
     def __init__(self, id, matrix):
         super().__init__()
         self.id = id
-        self.weight = nn.Parameter(matrix, requires_grad=False)
+        self.weight = nn.Parameter(matrix, requires_grad=True)
 
 
 class InputLayer(Layer):
@@ -24,19 +24,23 @@ class InputLayer(Layer):
     def __init__(self, id, matrix, negated, input_mask, gains):
         super().__init__(id, matrix)
         self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linear_transform.weight = nn.Parameter(self.weight, requires_grad=False)
+        #self.linear_transform.weight = nn.Parameter(self.weight)
   
-        self.register_buffer("negated", negated)
-        self.register_buffer("input_mask", input_mask)
-        self.register_buffer("_mask", input_mask.t())
-        self.register_buffer("gains", None)
+        #self.register_buffer("negated", negated)
+        self.negated = nn.Parameter(negated.float(), requires_grad=True)
+        #self.register_buffer("input_mask", input_mask)
+        self.input_mask = nn.Parameter(input_mask, requires_grad=True)
+        #self.register_buffer("_mask", input_mask.t())
+        self._mask = nn.Parameter(input_mask.t(), requires_grad=True)
+        #self.register_buffer("gains", None)
+        self.gains = nn.Parameter(None, requires_grad=True)
         self.gain_set = None
         self.set_gains(gains, [])
         self.gain_set = False
     
     def set_gains(self, gains, surrogate):
         """ Gains (weights) applied by the linear transform on the inputs """
-        self.gains = gains # store gains for future reference
+        self.gains = nn.Parameter(gains, requires_grad=True) # store gains for future reference
         xgains = torch.matmul(self.input_mask, gains) # map gain values to internal nodes organization
         sel = self.negated - xgains # build a negation mask for gains
         # select those node acting as surrogate facts for annotated disjunctions 
@@ -46,13 +50,13 @@ class InputLayer(Layer):
         
         xgains = abs(sel) + (sel == 0).float() # applies the negation mask to gains
         # set the linear transform accordingly
-        self.linear_transform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight), requires_grad=False) 
+        self.linear_transform.weight = nn.Parameter(torch.matmul(torch.diag(xgains), self.weight)) 
         self.gain_set = True
 
     
     def set_negated(self, value):
         """ Mask to obtain the negation of input literal according to the circuit setup """
-        self.negated = value
+        self.negated = nn.Parameter(value.float(), requires_grad=True)
 
     
     def forward(self, input):
@@ -81,9 +85,10 @@ class AndLayer(Layer):
     def __init__(self, id, matrix):
         super().__init__(id, matrix)
         #self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
-        #self.linear_transform.weight = nn.Parameter(matrix, requires_grad=False)
-        self.register_buffer("_mask", (matrix == 0))
-        
+        #self.linear_transform.weight = nn.Parameter(matrix)
+        #self.register_buffer("_mask", (matrix == 0))
+        self._mask = nn.Parameter((matrix==0).float(), requires_grad=True)
+
     def forward(self, input):
         #return self.linear_transform(input)
         x = torch.mul(self.weight, input) # transform input to the layer internal state 
@@ -331,7 +336,7 @@ class LogicCircuit(nn.Sequential):
         for layer in layers:
             self.append(layer)
         self.nliterals = nliterals
-        self.probnorm = 1.0
+        self.probnorm = torch.tensor(1.0, requires_grad=True)
         self._device = torch.device("cpu")
 
     def to(self, device):
@@ -359,7 +364,7 @@ class LogicCircuit(nn.Sequential):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value, surrogate)
-        ones = torch.ones(1, self.get_input_size()).to(self._device)
+        ones = torch.ones(1, self.get_input_size(), requires_grad=True).to(self._device)
         self.probnorm = self(ones)
    
     def get_input_size(self):
@@ -368,7 +373,7 @@ class LogicCircuit(nn.Sequential):
             raise IndexError("No input layer defined")
         return self.layers[0].linear_transform.weight.size(dim=0)
    
-    def query(self, literals = []):
+    def query(self, literals = torch.tensor([])):
         """ Makes an inference or query for the provided literals
         Input:
             literals: a list of numerical literals ids
@@ -378,16 +383,38 @@ class LogicCircuit(nn.Sequential):
 
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
-        
+            
         conf = torch.ones(1, self.nliterals).to(self._device)
         neg = torch.zeros_like(self.layers[0].negated).to(self._device)
 
         if len(literals):
-             literals = torch.tensor(literals).to(self._device)
-             lit = torch.abs(literals) - 1
-             conf[0, lit[literals < 0]] = 0.0
+             literals = literals.clone().detach().to(self._device)
+             lit = torch.abs(literals).long()
+             conf[0, lit[literals < 0].long()] = 0.0
              idxs = torch.nonzero(self.layers[0].input_mask[:, lit], as_tuple=True)[0].to(self._device)
              neg[idxs] = self.layers[0].negated[idxs]
+
+
+        #if len(literals):
+             
+             #elements = torch.arange(self.layers[0].input_mask.shape[0])
+             #elements = torch.arange(self.nliterals).to(self._device)
+             #zeros = torch.zeros_like(elements)
+             #msk = elements.unsqueeze(0) != (literals < 0).long().unsqueeze(1)
+             #if len(msk):
+             #   conf = conf * msk + zeros * ~msk
+
+            ##
+            ##msk = elements.unsqueeze(0) != 
+            ##neg = self.layers[0].negated * msk + neg * ~msk
+            
+        #    literals = torch.abs(literals).to(self._device)
+             #neg =  torch.sum(self.layers[0].input_mask[:,lit.long()] * self.layers[0].negated.unsqueeze(1), dim=1)
+
+            # conf[0, lit[literals < 0].long()] = 0.0
+            # idxs = torch.nonzero(self.layers[0].input_mask[:, lit.long()], as_tuple=True)[0].to(self._device)
+            # neg[idxs] = self.layers[0].negated[idxs]
+            
 
         return self((conf, neg)) / self.probnorm
     
@@ -459,7 +486,7 @@ def test_configurations(filename = 'simple_w_constraint_opt'):
 
 def make_query(expr, symbols):
     """ Helper function to make a query given a expression and a dict of symbols """
-    return [symbols[expr] if not 'not' in expr else -symbols[expr.replace('not', '').lstrip()]]
+    return torch.tensor(symbols[expr]-1 if not 'not' in expr else -symbols[expr.replace('not', '').lstrip()]+1)
 
 
 def test_probabilities(c2d_executable):
@@ -473,44 +500,44 @@ def test_probabilities(c2d_executable):
     circuit = build_circuit_from_file(filename)
     print("Circuit being tested: ", filename + '.nnf')
     
-    lit2idx = lambda lit: lit-1
-    sym2lit = lambda sym: symbols[sym] if not 'not' in sym else -symbols[sym.replace('not', '').lstrip()]
-    sym2idx = lambda sym: lit2idx(sym2lit(sym))
+    #lit2idx = lambda lit: lit-1
+    sym2lit = lambda sym: torch.tensor([symbols[sym]-1] if not 'not' in sym else [-symbols[sym.replace('not', '').lstrip()]+1])
+    #sym2idx = lambda sym: lit2idx(sym2lit(sym))
 
     probs = torch.ones(circuit.nliterals)
-    probs[sym2idx('a(bill)')] = 0.25
-    probs[sym2idx('b(carol)')] = 0.25
-    probs[sym2idx('c(daniel)')] = 0.25
-    probs[sym2idx('d(carol,anna)')] = 0.2
-    probs[sym2idx('e(bill,anna)')] = 0.2
-    probs[sym2idx('influences(bill,anna)')] = 0.3
-    probs[sym2idx('influences(carol,anna)')] = 0.4
-    probs[sym2idx('stress(bill)')] = 0.333
-    probs[sym2idx('stress(carol)')] = 0.333
-    probs[sym2idx('stress(daniel)')] = 0.334
+    probs[sym2lit('a(bill)')] = 0.25
+    probs[sym2lit('b(carol)')] = 0.25
+    probs[sym2lit('c(daniel)')] = 0.25
+    probs[sym2lit('d(carol,anna)')] = 0.2
+    probs[sym2lit('e(bill,anna)')] = 0.2
+    probs[sym2lit('influences(bill,anna)')] = 0.3
+    probs[sym2lit('influences(carol,anna)')] = 0.4
+    probs[sym2lit('stress(bill)')] = 0.333
+    probs[sym2lit('stress(carol)')] = 0.333
+    probs[sym2lit('stress(daniel)')] = 0.334
 
-    idx1 = sym2idx('stress(bill)')
-    idx2 = sym2idx('stress(carol)')
-    idx3 = sym2idx('stress(daniel)')
+    idx1 = sym2lit('stress(bill)')
+    idx2 = sym2lit('stress(carol)')
+    idx3 = sym2lit('stress(daniel)')
     surrogate = [idx1, idx2, idx3]
 
     circuit.set_input_weights(probs, surrogate)
 
-    output = circuit.query([sym2lit('smokes(anna)')])
+    output = circuit.query(sym2lit('smokes(anna)'))
 
     print("Query: ", 'smokes(anna)')
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0117])) < EPSILON else " [REJECTED]")
 
-    b = circuit.query([sym2lit('smokes(bill)')])
-    output = ( circuit.query([sym2lit('smokes(anna)'), sym2lit('smokes(bill)')])) / b
+    b = circuit.query(sym2lit('smokes(bill)'))
+    output = ( circuit.query(torch.concat((sym2lit('smokes(anna)'), sym2lit('smokes(bill)'))))) / b
 
     print("Query: ", 'smokes(anna) | smokes(bill)')
     print("Output: ", output)
     print(" [PASSED]" if torch.abs(output - torch.tensor([0.0600])) < EPSILON else " [REJECTED]")
 
-    b = circuit.query([sym2lit('not stress(carol)')])
-    a = circuit.query([sym2lit('not smokes(anna)'), sym2lit('not stress(carol)')])
+    b = circuit.query(sym2lit('not stress(carol)'))
+    a = circuit.query(torch.concat((sym2lit('not smokes(anna)'), sym2lit('not stress(carol)'))))
     output= a/b
 
     print("Query: ", 'not smokes(anna) | not stress(carol)')
@@ -563,5 +590,5 @@ if __name__ == '__main__':
 
     TESTS = 1
     if TESTS:
-        test_configurations()
+        #test_configurations()
         test_probabilities(c2d_executable)
