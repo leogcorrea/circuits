@@ -13,7 +13,7 @@ class Layer(nn.Module):
     def __init__(self, id, matrix):
         super().__init__()
         self.id = id
-        self.weight = nn.Parameter(matrix, requires_grad=True)
+        self.weight = nn.Parameter(matrix) #, requires_grad=True)
 
 
 class InputLayer(Layer):
@@ -27,20 +27,20 @@ class InputLayer(Layer):
         #self.linear_transform.weight = nn.Parameter(self.weight)
   
         #self.register_buffer("negated", negated)
-        self.negated = nn.Parameter(negated.float(), requires_grad=True)
+        self.negated = nn.Parameter(negated.float()) #, requires_grad=True)
         #self.register_buffer("input_mask", input_mask)
-        self.input_mask = nn.Parameter(input_mask, requires_grad=True)
+        self.input_mask = nn.Parameter(input_mask) #, requires_grad=True)
         #self.register_buffer("_mask", input_mask.t())
-        self._mask = nn.Parameter(input_mask.t(), requires_grad=True)
+        self._mask = nn.Parameter(input_mask.t()) #, requires_grad=True)
         #self.register_buffer("gains", None)
-        self.gains = nn.Parameter(None, requires_grad=True)
+        self.gains = nn.Parameter(None) #, requires_grad=True)
         self.gain_set = None
         self.set_gains(gains, [])
         self.gain_set = False
     
     def set_gains(self, gains, surrogate):
         """ Gains (weights) applied by the linear transform on the inputs """
-        self.gains = nn.Parameter(gains, requires_grad=True) # store gains for future reference
+        self.gains = nn.Parameter(gains) #, requires_grad=True) # store gains for future reference
         xgains = torch.matmul(self.input_mask, gains) # map gain values to internal nodes organization
         sel = self.negated - xgains # build a negation mask for gains
         # select those node acting as surrogate facts for annotated disjunctions 
@@ -56,7 +56,7 @@ class InputLayer(Layer):
     
     def set_negated(self, value):
         """ Mask to obtain the negation of input literal according to the circuit setup """
-        self.negated = nn.Parameter(value.float(), requires_grad=True)
+        self.negated = nn.Parameter(value.float()) #, requires_grad=True)
 
     
     def forward(self, input):
@@ -87,7 +87,7 @@ class AndLayer(Layer):
         #self.linear_transform = nn.Linear(in_features=matrix.size(dim=1), out_features=matrix.size(dim=0), bias=False)
         #self.linear_transform.weight = nn.Parameter(matrix)
         #self.register_buffer("_mask", (matrix == 0))
-        self._mask = nn.Parameter((matrix==0).float(), requires_grad=True)
+        self._mask = nn.Parameter((matrix==0).float()) #, requires_grad=True)
 
     def forward(self, input):
         #return self.linear_transform(input)
@@ -336,7 +336,7 @@ class LogicCircuit(nn.Sequential):
         for layer in layers:
             self.append(layer)
         self.nliterals = nliterals
-        self.probnorm = torch.tensor(1.0, requires_grad=True)
+        self.probnorm = torch.tensor(1.0) #, requires_grad=True)
         self._device = torch.device("cpu")
 
     def to(self, device):
@@ -364,7 +364,7 @@ class LogicCircuit(nn.Sequential):
         if len(self.layers) == 0:
             raise IndexError("No input layer defined")
         self.layers[0].set_gains(value, surrogate)
-        ones = torch.ones(1, self.get_input_size(), requires_grad=True).to(self._device)
+        ones = torch.ones(1, self.get_input_size()).to(self._device) #, requires_grad=True).to(self._device)
         self.probnorm = self(ones)
    
     def get_input_size(self):
@@ -486,7 +486,7 @@ def test_configurations(filename = 'simple_w_constraint_opt'):
 
 def make_query(expr, symbols):
     """ Helper function to make a query given a expression and a dict of symbols """
-    return torch.tensor(symbols[expr]-1 if not 'not' in expr else -symbols[expr.replace('not', '').lstrip()]+1)
+    return torch.tensor([symbols[expr]-1] if not 'not' in expr else [-symbols[expr.replace('not', '').lstrip()]+1])
 
 
 def test_probabilities(c2d_executable):
@@ -501,7 +501,7 @@ def test_probabilities(c2d_executable):
     print("Circuit being tested: ", filename + '.nnf')
     
     #lit2idx = lambda lit: lit-1
-    sym2lit = lambda sym: torch.tensor([symbols[sym]-1] if not 'not' in sym else [-symbols[sym.replace('not', '').lstrip()]+1])
+    sym2lit = lambda sym: make_query(sym, symbols)
     #sym2idx = lambda sym: lit2idx(sym2lit(sym))
 
     probs = torch.ones(circuit.nliterals)

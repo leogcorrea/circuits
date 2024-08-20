@@ -79,15 +79,18 @@ def operate(nn_model, pc_model, query_builder, device, data_loader, optimizer, e
     else:
         nn_model.eval()
     test_loss = 0
+    #loss = 0
     correct = 0
     n = 19    
     queries = torch.zeros(n, 1)
     for k in range(0, n):
         queries[k] = query_builder( f"add({k})" )
+    half_batch = data_loader.batch_size // 2
     s = len(data_loader.dataset)//2
-    m = 20
     b = 1
-    probs = torch.ones(500, circuit.nliterals).to(device)
+    batches = len(data_loader.dataset) // data_loader.batch_size
+
+    probs = torch.ones(half_batch, circuit.nliterals).to(device)
 
     ###f = torch.vmap(pc_model.query)
 
@@ -95,34 +98,40 @@ def operate(nn_model, pc_model, query_builder, device, data_loader, optimizer, e
         for batch_idx, (data, target) in enumerate(data_loader):
             if train_mode:
                 optimizer.zero_grad()
-            start = time.time()
-            print("\rBatch {} of {}".format(b, 10))
+            #start = time.time()
+            print("\rBatch {} of {}".format(b, batches))
             b+=1
             data, target = data.to(device), target.to(device)
             output = nn_model(data)
 
             h = output.size(dim=0)//2
 
-            pred = torch.zeros(h, requires_grad=True).to(device)
+            #pred = torch.zeros(h, n).to(device)
+            #tgt = torch.add(target[:h], target[h:]).to(device)
+            pred = torch.empty(h).to(device)
             tgt = torch.add(target[:h], target[h:]).float().to(device)
-            tgt.requires_grad = True
-            probs[:, 0:m] = torch.concat((output[:h], output[h:]), dim = 1)
+            probs[:, 0:(n+1)] = torch.concat((output[:h], output[h:]), dim = 1)
 
-            for i, (p, _) in enumerate(zip(probs, tgt)): 
-                q = torch.zeros(n)
+            for i, p in enumerate(probs): 
+                q = torch.zeros(n).to(device)
 
                 pc_model.set_input_weights(p)
 
                 for k in range(0, n):
                    q[k] = pc_model.query(queries[k])
+                #   pred[i, k] = pc_model.query(queries[k])
                 
                 pred[i] = q.argmax(keepdim=True)
 
-            elapsed = time.time() - start
-            print("Batch elapsed time:", elapsed)
-
-            #loss += F.nll_loss(pred, tgt, reduction='sum').item()  # sum up batch loss
+            #elapsed = time.time() - start
+            #print("Batch elapsed time:", elapsed)
+            tgt.requires_grad = True
+            pred.requires_grad = True
+            
+            #correct += tgt.eq(pred.view_as(tgt)).sum().item()
             loss = F.cross_entropy(pred, tgt)
+            #loss = F.nll_loss(pred, tgt) #, reduction='sum').item()  # sum up batch loss
+         
 
             if train_mode:
                 loss.backward()
@@ -130,7 +139,7 @@ def operate(nn_model, pc_model, query_builder, device, data_loader, optimizer, e
             else:
                 test_loss += loss
 
-            correct += tgt.eq(pred.view_as(tgt)).sum().item()
+            #correct += tgt.eq(pred.view_as(tgt)).sum().item()
  
         print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
             epoch, (batch_idx-1) * len(data), len(data_loader.dataset),
@@ -159,8 +168,8 @@ if __name__ == '__main__':
     else:
         device = torch.device("cpu")
 
-    train_kwargs = {'batch_size': 64}
-    test_kwargs = {'batch_size': 1000}
+    train_kwargs = {'batch_size': 500}
+    test_kwargs = {'batch_size': 50}
 
     transform=transforms.Compose([
         transforms.ToTensor(),
